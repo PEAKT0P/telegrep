@@ -1,0 +1,189 @@
+#!/sbin/openrc-run
+# Copyright 2025 Gentoo Authors
+# Distributed under the terms of the GNU General Public License v2
+
+description="Telegrep - Log monitoring and Telegram notification daemon"
+
+command="/opt/telegrep/telegrep"
+command_args=""
+pidfile="/var/run/telegrep.pid"
+command_background="yes"
+start_stop_daemon_args="--wait 100"
+
+# Зависимости
+depend() {
+    need net
+    use logger
+    after network
+}
+
+# Предстартовые проверки
+start_pre() {
+    # Проверяем наличие конфига
+    if [ ! -f /opt/telegrep/settings.conf ]; then
+        eerror "Configuration file /opt/telegrep/settings.conf not found"
+        return 1
+    fi
+
+    # Проверяем права доступа к конфигу
+    local perms=$(stat -c %a /opt/telegrep/settings.conf 2>/dev/null)
+    if [ "$perms" != "600" ]; then
+        ewarn "Configuration file should have 0600 permissions"
+        ewarn "Current permissions: $perms"
+        ewarn "Run: chmod 600 /opt/telegrep/settings.conf"
+    fi
+
+    # Проверяем наличие лог-файла
+    if [ ! -f /var/log/messages ]; then
+        ewarn "Log file /var/log/messages not found"
+        ewarn "Daemon will wait for log file to appear"
+    fi
+
+    # Создаём директорию для pid если не существует
+    checkpath --directory --mode 0755 /var/run
+
+    return 0
+}
+
+# Действия после запуска
+start_post() {
+    # Даём время демону корректно запуститься
+    sleep 1
+
+    if [ -f "$pidfile" ]; then
+        local pid=$(cat "$pidfile")
+        if kill -0 "$pid" 2>/dev/null; then
+            einfo "Telegrep started successfully (PID: $pid)"
+            return 0
+        else
+            eerror "Telegrep failed to start"
+            return 1
+        fi
+    else
+        eerror "PID file not created"
+        return 1
+    fi
+}
+
+# Перезагрузка конфигурации
+reload() {
+    ebegin "Reloading telegrep configuration"
+
+    if [ ! -f "$pidfile" ]; then
+        eerror "PID file not found, daemon is not running?"
+        eend 1
+        return 1
+    fi
+
+    local pid=$(cat "$pidfile")
+
+    # Отправляем SIGHUP для перезагрузки конфига
+    if kill -HUP "$pid" 2>/dev/null; then
+        einfo "Configuration reload signal sent to PID $pid"
+        einfo "Note: Some settings require full restart to take effect"
+        eend 0
+    else
+        eerror "Failed to send signal to PID $pid"
+        eend 1
+        return 1
+    fi
+}
+
+# Действия перед остановкой
+stop_pre() {
+    ebegin "Stopping telegrep gracefully"
+
+    if [ -f "$pidfile" ]; then
+        local pid=$(cat "$pidfile")
+        einfo "Sending SIGTERM to PID $pid"
+    fi
+
+    return 0
+}
+
+# Действия после остановки
+stop_post() {
+    # Убеждаемся что pid файл удалён
+    if [ -f "$pidfile" ]; then
+        rm -f "$pidfile"
+    fi
+
+    einfo "Telegrep stopped"
+    return 0
+}
+
+# Проверка статуса
+status() {
+    if [ -f "$pidfile" ]; then
+        local pid=$(cat "$pidfile")
+        if kill -0 "$pid" 2>/dev/null; then
+            einfo "Telegrep is running (PID: $pid)"
+
+            # Показываем дополнительную информацию
+            einfo "Memory usage: $(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.1f MB\n", $1/1024}')"
+            einfo "CPU usage: $(ps -o %cpu= -p "$pid" 2>/dev/null | awk '{print $1"%"}')"
+            einfo "Uptime: $(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
+
+            return 0
+        else
+            eerror "PID file exists but process is not running"
+            return 1
+        fi
+    else
+        einfo "Telegrep is not running"
+        return 3
+    fi
+}
+
+# Показать последние логи
+logs() {
+    einfo "Recent telegrep logs from syslog:"
+    echo ""
+    tail -n 20 /var/log/messages | grep telegrep || eerror "No telegrep logs found"
+}
+
+# Проверка конфигурации
+checkconfig() {
+    ebegin "Checking telegrep configuration"
+
+    if [ ! -f /opt/telegrep/settings.conf ]; then
+        eerror "Configuration file not found"
+        eend 1
+        return 1
+    fi
+
+    # Проверяем синтаксис конфига
+    local errors=0
+
+    # Проверяем наличие обязательных параметров
+    for param in token chat_id pattern; do
+        if ! grep -q "^${param}=" /opt/telegrep/settings.conf; then
+            eerror "Missing required parameter: $param"
+            errors=$((errors + 1))
+        fi
+    done
+
+    # Проверяем права доступа
+    local perms=$(stat -c %a /opt/telegrep/settings.conf 2>/dev/null)
+    if [ "$perms" != "600" ]; then
+        ewarn "Configuration file permissions should be 0600 (current: $perms)"
+    fi
+
+    if [ $errors -eq 0 ]; then
+        einfo "Configuration is valid"
+        eend 0
+        return 0
+    else
+        eerror "Found $errors error(s) in configuration"
+        eend 1
+        return 1
+    fi
+}
+
+# Дополнительные команды
+extra_commands="reload logs checkconfig"
+extra_started_commands="reload"
+
+description_reload="Reload configuration without restarting"
+description_logs="Show recent log entries"
+description_checkconfig="Validate configuration file"
